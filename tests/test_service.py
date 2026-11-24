@@ -55,7 +55,7 @@ def request(token: str = "allowed", **body: object) -> Response:
     payload: dict[str, object] = {
         "capabilityVersion": "1.0",
         "inputSchemaVersion": "1.0",
-        "input": {"jobText": "Synthetic role"},
+        "input": {"jobText": "Synthetic role", "sourceLanguage": "en"},
     }
     payload.update(body)
     return client().post(
@@ -106,3 +106,28 @@ def test_rejects_invalid_boundary_input_and_configuration() -> None:
     assert missing_key.status_code == 400
     with pytest.raises(ValidationError):
         Settings.model_validate({"app_env": "production", "log_level": "verbose"})
+    with pytest.raises(ValidationError):
+        Settings(
+            app_env="test",
+            log_level="info",
+            oidc_issuer="https://identity.example.invalid/realms/careeros",
+            oidc_audience="careeros-api",
+            openai_api_key="synthetic-provider-key",
+        )
+
+
+def test_configured_provider_is_ready_without_exposing_secret() -> None:
+    settings = Settings(
+        app_env="test",
+        log_level="error",
+        oidc_issuer="https://identity.example.invalid/realms/careeros",
+        oidc_audience="careeros-api",
+        openai_api_key="synthetic-provider-key",
+        openai_model="synthetic-model",
+    )
+
+    with TestClient(create_app(settings, token_verifier=FakeVerifier())) as api:
+        response = api.get("/health/ready")
+
+    assert response.json()["status"] == "ready"
+    assert "synthetic-provider-key" not in repr(settings)

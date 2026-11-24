@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Literal, Protocol, cast
 from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response, Security
@@ -11,19 +11,23 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import OpenIdConnect
 from fastapi.security.utils import get_authorization_scheme_param
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
+from openai import OpenAI
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from starlette.middleware.base import RequestResponseEndpoint
 
+from careeros_ai_gateway.adapters.openai import OpenAIResponsesGateway, ResponsesClient
 from careeros_ai_gateway.application.capability import (
     AccountContext,
     CapabilityGateway,
+    CapabilityInputInvalid,
     CapabilityInvocation,
     CapabilityResult,
     CapabilityUnavailable,
     InvokeCapability,
     PermissionDenied,
     ProviderOutput,
+    ProviderResponseInvalid,
     UnsupportedCapability,
 )
 
@@ -37,6 +41,14 @@ class Settings(BaseSettings):
     log_level: Literal["debug", "info", "warning", "error"]
     oidc_issuer: AnyHttpUrl
     oidc_audience: str = Field(min_length=1)
+    openai_api_key: SecretStr | None = None
+    openai_model: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_provider_configuration(self) -> Settings:
+        if (self.openai_api_key is None) != (self.openai_model is None):
+            raise ValueError("OPENAI_API_KEY and OPENAI_MODEL must be configured together")
+        return self
 
 
 class Problem(BaseModel):
@@ -84,7 +96,16 @@ def create_app(
     token_verifier: TokenVerifier | None = None,
 ) -> FastAPI:
     configured = settings or Settings()
-    provider = gateway or UnavailableGateway()
+    provider: CapabilityGateway
+    if gateway is not None:
+        provider = gateway
+    elif configured.openai_api_key is not None and configured.openai_model is not None:
+        client = OpenAI(api_key=configured.openai_api_key.get_secret_value(), max_retries=0)
+        provider = OpenAIResponsesGateway(
+            cast(ResponsesClient, client.responses), configured.openai_model
+        )
+    else:
+        provider = UnavailableGateway()
     verifier = token_verifier or RejectingTokenVerifier()
     invoke = InvokeCapability(provider, _VERSIONS)
     oidc = OpenIdConnect(
@@ -185,6 +206,12 @@ def create_app(
         except UnsupportedCapability:
             raise _error(
                 422, "CAPABILITY_UNSUPPORTED", "Capability or version is unsupported."
+            ) from None
+        except CapabilityInputInvalid:
+            raise _error(422, "CAPABILITY_INPUT_INVALID", "Capability input is invalid.") from None
+        except ProviderResponseInvalid:
+            raise _error(
+                502, "PROVIDER_RESPONSE_INVALID", "Provider output failed validation."
             ) from None
         except CapabilityUnavailable:
             raise _error(503, "CAPABILITY_UNAVAILABLE", "No provider route is available.") from None

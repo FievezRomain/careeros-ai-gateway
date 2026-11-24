@@ -29,6 +29,27 @@ against their own verified facts and rules.
 
 The matching service calls a stable capability such as `extract-job-requirements`. The gateway may route it to an OpenAI model, Claude or a local model according to configuration, privacy, cost and availability, then normalize the validated response. Provider-specific features remain explicit; the gateway does not pretend all models are identical.
 
+## V1-021 OpenAI adapter
+
+The first provider adapter implements `extract-job-requirements` through the
+OpenAI Responses API while preserving the provider-neutral application port.
+
+- Pydantic models reject malformed or unknown capability input before a call
+  and revalidate the parsed provider output afterward.
+- Email addresses, phone numbers and URLs are deterministically replaced before
+  job text leaves CareerOS. Full profiles and contact data are never inputs.
+- Job text is treated as untrusted data. The evidence-only prompt is recorded as
+  `extract-job-requirements-v1` in response provenance.
+- Structured Outputs use the CareerOS output model. `store=false` disables
+  response storage, the idempotency key is forwarded and SDK retries are
+  disabled until V1-022 defines policy.
+- Missing credentials keep the gateway not ready. API keys use `SecretStr`, are
+  never serialized and belong in an environment secret store.
+
+Generated requirements are not authoritative. Consumers still apply
+deterministic rules and verified evidence. CI uses an injected fake Responses
+boundary and never contacts a live provider.
+
 ## Contract rules
 
 - APIs and events are versioned.
