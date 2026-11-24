@@ -17,12 +17,16 @@ from careeros_ai_gateway.application.capability import (
 
 
 class FakeGateway:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def ready(self) -> bool:
         return True
 
     def invoke(
         self, capability_id: str, invocation: CapabilityInvocation, idempotency_key: str
     ) -> ProviderOutput:
+        self.calls += 1
         return ProviderOutput(
             output_schema_version="1.0",
             output={"requirements": ["Python"]},
@@ -73,6 +77,7 @@ def test_health_and_openapi_contract() -> None:
             "/v1/capabilities/{capability_id}/invocations"
         ]["post"]
     assert operation["security"]
+    assert "429" in operation["responses"]
 
 
 def test_provider_neutral_invocation_and_redacted_log(caplog: pytest.LogCaptureFixture) -> None:
@@ -80,10 +85,16 @@ def test_provider_neutral_invocation_and_redacted_log(caplog: pytest.LogCaptureF
         response = request()
     assert response.status_code == 200
     assert response.json()["output"] == {"requirements": ["Python"]}
-    assert response.json()["provenance"] == {
+    provenance = response.json()["provenance"]
+    assert provenance == {
         "modelVersion": "fake-v1",
         "promptVersion": "extract-v1",
+        "providerAttempts": 1,
+        "latencyMs": provenance["latencyMs"],
+        "inputUnits": None,
+        "outputUnits": None,
     }
+    assert provenance["latencyMs"] >= 0
     assert "Synthetic role" not in caplog.text
     assert json.loads(caplog.records[-1].message)["path"].endswith("/invocations")
 
@@ -114,6 +125,32 @@ def test_rejects_invalid_boundary_input_and_configuration() -> None:
             oidc_audience="careeros-api",
             openai_api_key="synthetic-provider-key",
         )
+    with pytest.raises(ValidationError):
+        Settings(
+            app_env="test",
+            log_level="info",
+            oidc_issuer="https://identity.example.invalid/realms/careeros",
+            oidc_audience="careeros-api",
+            openai_fallback_model="synthetic-fallback",
+        )
+    with pytest.raises(ValidationError):
+        Settings(
+            app_env="test",
+            log_level="info",
+            oidc_issuer="https://identity.example.invalid/realms/careeros",
+            oidc_audience="careeros-api",
+            ai_timeout_seconds=0,
+        )
+    with pytest.raises(ValidationError):
+        Settings(
+            app_env="test",
+            log_level="info",
+            oidc_issuer="https://identity.example.invalid/realms/careeros",
+            oidc_audience="careeros-api",
+            openai_api_key="synthetic-provider-key",
+            openai_model="same-model",
+            openai_fallback_model="same-model",
+        )
 
 
 def test_configured_provider_is_ready_without_exposing_secret() -> None:
@@ -131,3 +168,37 @@ def test_configured_provider_is_ready_without_exposing_secret() -> None:
 
     assert response.json()["status"] == "ready"
     assert "synthetic-provider-key" not in repr(settings)
+
+
+def test_quota_returns_retry_after_without_reinvoking_provider() -> None:
+    settings = Settings(
+        app_env="test",
+        log_level="error",
+        oidc_issuer="https://identity.example.invalid/realms/careeros",
+        oidc_audience="careeros-api",
+        ai_quota_per_minute=1,
+    )
+    gateway = FakeGateway()
+    payload = {
+        "capabilityVersion": "1.0",
+        "inputSchemaVersion": "1.0",
+        "input": {"jobText": "Synthetic role", "sourceLanguage": "en"},
+    }
+
+    with TestClient(create_app(settings, gateway, FakeVerifier())) as api:
+        first = api.post(
+            "/v1/capabilities/extract-job-requirements/invocations",
+            headers={"Authorization": "Bearer allowed", "Idempotency-Key": "synthetic-request-101"},
+            json=payload,
+        )
+        limited = api.post(
+            "/v1/capabilities/extract-job-requirements/invocations",
+            headers={"Authorization": "Bearer allowed", "Idempotency-Key": "synthetic-request-102"},
+            json=payload,
+        )
+
+    assert first.status_code == 200
+    assert limited.status_code == 429
+    assert limited.headers["Retry-After"] == "60"
+    assert limited.json()["code"] == "QUOTA_EXCEEDED"
+    assert gateway.calls == 1

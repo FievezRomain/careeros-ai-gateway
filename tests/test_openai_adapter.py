@@ -12,15 +12,24 @@ from careeros_ai_gateway.application.capability import (
 
 
 class FakeResponses:
-    def __init__(self, output: object, status: str = "completed") -> None:
+    def __init__(
+        self,
+        output: object,
+        status: str = "completed",
+        usage: tuple[int, int] = (120, 30),
+    ) -> None:
         self.output = output
         self.status = status
+        self.usage = usage
         self.calls: list[dict[str, object]] = []
 
     def parse(self, **kwargs: object) -> object:
         self.calls.append(kwargs)
         return SimpleNamespace(
-            model="synthetic-model-v1", status=self.status, output_parsed=self.output
+            model="synthetic-model-v1",
+            status=self.status,
+            output_parsed=self.output,
+            usage=SimpleNamespace(input_tokens=self.usage[0], output_tokens=self.usage[1]),
         )
 
 
@@ -67,8 +76,11 @@ def test_validates_redacts_and_revalidates_structured_output() -> None:
     assert "120000-150000" in sent_text
     assert all(marker in sent_text for marker in ("[EMAIL]", "[PHONE]", "[URL]"))
     assert call["store"] is False
+    assert call["timeout"] == 20
     assert call["extra_headers"] == {"Idempotency-Key": "synthetic-request-001"}
     assert result.provenance.model_version == "synthetic-model-v1"
+    assert result.provenance.input_units == 120
+    assert result.provenance.output_units == 30
     output = cast(dict[str, object], result.output)
     requirements = cast(list[dict[str, object]], output["requirements"])
     assert requirements[0]["description"] == "Python"
@@ -112,4 +124,17 @@ def test_rejects_incomplete_provider_response() -> None:
             "extract-job-requirements",
             invocation({"jobText": "Python required", "sourceLanguage": "en"}),
             "synthetic-request-004",
+        )
+
+
+def test_rejects_invalid_provider_usage() -> None:
+    gateway = OpenAIResponsesGateway(
+        FakeResponses({"requirements": []}, usage=(-1, 30)), "synthetic-model"
+    )
+
+    with pytest.raises(ProviderResponseInvalid):
+        gateway.invoke(
+            "extract-job-requirements",
+            invocation({"jobText": "Python required", "sourceLanguage": "en"}),
+            "synthetic-request-005",
         )
