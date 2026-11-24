@@ -34,6 +34,22 @@ class CapabilityInvocation(ContractModel):
     input: dict[str, JsonValue] = Field(min_length=1)
 
 
+class ExtractJobRequirementsInput(ContractModel):
+    job_text: str = Field(min_length=1, max_length=30_000)
+    source_language: str = Field(pattern=r"^[a-z]{2}(?:-[A-Z]{2})?$")
+
+
+class ExtractedRequirement(ContractModel):
+    category: str = Field(min_length=1, max_length=50)
+    description: str = Field(min_length=1, max_length=500)
+    required: bool
+    evidence: tuple[str, ...] = Field(max_length=5)
+
+
+class ExtractJobRequirementsOutput(ContractModel):
+    requirements: tuple[ExtractedRequirement, ...] = Field(max_length=100)
+
+
 class CapabilityProvenance(ContractModel):
     model_version: str = Field(min_length=1, max_length=200)
     prompt_version: str = Field(min_length=1, max_length=100)
@@ -67,6 +83,14 @@ class UnsupportedCapability(Exception):
 
 
 class CapabilityUnavailable(Exception):
+    pass
+
+
+class CapabilityInputInvalid(Exception):
+    pass
+
+
+class ProviderResponseInvalid(Exception):
     pass
 
 
