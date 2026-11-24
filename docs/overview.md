@@ -20,10 +20,9 @@ Provider adapters, prompt/model versions and non-sensitive inference metadata.
 
 V1-020 defines the core-owned `CapabilityGateway` port and constructor-injects
 it into the invocation use case. The default composition has no provider route
-and refuses readiness/invocation until V1-021 supplies an adapter. V1-022 owns
-timeouts, quotas, retries, fallback selection, cost metadata and durable
-idempotent replay. Consumers still validate generated output deterministically
-against their own verified facts and rules.
+and refuses readiness/invocation until a provider adapter is configured.
+Consumers still validate generated output deterministically against their own
+verified facts and rules.
 
 ## Example
 
@@ -49,6 +48,22 @@ OpenAI Responses API while preserving the provider-neutral application port.
 Generated requirements are not authoritative. Consumers still apply
 deterministic rules and verified evidence. CI uses an injected fake Responses
 boundary and never contacts a live provider.
+
+## V1-022 execution policy
+
+- `AI_TIMEOUT_SECONDS` bounds provider calls above 0 and up to 120 seconds (20 by
+  default). SDK retries stay disabled so fallback remains explicit and testable.
+- `AI_QUOTA_PER_MINUTE` limits calls per tenant, account and capability. Exhaustion
+  returns `429 QUOTA_EXCEEDED` with `Retry-After` without calling a provider.
+- `OPENAI_FALLBACK_MODEL` selects one optional secondary route, used only after
+  unavailability or timeout and never after invalid structured output.
+- Provenance reports route attempts, total latency and provider usage units for
+  cost attribution; these are not a monetary price or billing guarantee.
+- Logs contain only capability, route slot, outcome and elapsed time, never payloads,
+  identities, credentials or idempotency keys.
+
+The V1 quota is process-local; horizontal scale requires a shared adapter. Routes use
+stable derived idempotency keys. This stateless service does not claim durable replay.
 
 ## Contract rules
 

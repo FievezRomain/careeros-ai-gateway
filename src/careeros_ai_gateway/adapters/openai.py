@@ -4,7 +4,7 @@ import re
 from typing import Protocol
 
 from openai import APIError
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from careeros_ai_gateway.application.capability import (
     CapabilityInputInvalid,
@@ -41,11 +41,18 @@ class ResponsesClient(Protocol):
     def parse(self, **kwargs: object) -> object: ...
 
 
+class ProviderUsage(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="ignore", frozen=True)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+
+
 class ProviderResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="ignore", frozen=True)
-    model: str
+    model: str = Field(min_length=1, max_length=200)
     status: str
     output_parsed: object | None
+    usage: ProviderUsage | None = None
 
 
 def _redact(text: str) -> str:
@@ -55,9 +62,10 @@ def _redact(text: str) -> str:
 
 
 class OpenAIResponsesGateway:
-    def __init__(self, responses: ResponsesClient, model: str) -> None:
+    def __init__(self, responses: ResponsesClient, model: str, timeout_seconds: float = 20) -> None:
         self._responses = responses
         self._model = model
+        self._timeout_seconds = timeout_seconds
 
     def ready(self) -> bool:
         return True
@@ -86,6 +94,7 @@ class OpenAIResponsesGateway:
                 ],
                 text_format=ExtractJobRequirementsOutput,
                 store=False,
+                timeout=self._timeout_seconds,
                 extra_headers={"Idempotency-Key": idempotency_key},
             )
             response = ProviderResponse.model_validate(raw)
@@ -102,5 +111,7 @@ class OpenAIResponsesGateway:
             provenance=CapabilityProvenance(
                 model_version=response.model,
                 prompt_version=PROMPT_VERSION,
+                input_units=response.usage.input_tokens if response.usage else None,
+                output_units=response.usage.output_tokens if response.usage else None,
             ),
         )

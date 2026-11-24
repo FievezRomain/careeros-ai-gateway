@@ -53,6 +53,10 @@ class ExtractJobRequirementsOutput(ContractModel):
 class CapabilityProvenance(ContractModel):
     model_version: str = Field(min_length=1, max_length=200)
     prompt_version: str = Field(min_length=1, max_length=100)
+    provider_attempts: int = Field(default=1, ge=1, le=3)
+    latency_ms: int = Field(default=0, ge=0)
+    input_units: int | None = Field(default=None, ge=0)
+    output_units: int | None = Field(default=None, ge=0)
 
 
 class ProviderOutput(ContractModel):
@@ -72,6 +76,10 @@ class CapabilityGateway(Protocol):
     def invoke(
         self, capability_id: str, invocation: CapabilityInvocation, idempotency_key: str
     ) -> ProviderOutput: ...
+
+
+class InvocationQuota(Protocol):
+    def consume(self, account: AccountContext, capability_id: str) -> int | None: ...
 
 
 class PermissionDenied(Exception):
@@ -94,10 +102,21 @@ class ProviderResponseInvalid(Exception):
     pass
 
 
+class QuotaExceeded(Exception):
+    def __init__(self, retry_after_seconds: int) -> None:
+        self.retry_after_seconds = retry_after_seconds
+
+
 class InvokeCapability:
-    def __init__(self, gateway: CapabilityGateway, versions: Mapping[str, str]) -> None:
+    def __init__(
+        self,
+        gateway: CapabilityGateway,
+        versions: Mapping[str, str],
+        quota: InvocationQuota | None = None,
+    ) -> None:
         self._gateway = gateway
         self._versions = versions
+        self._quota = quota
 
     def execute(
         self,
@@ -115,6 +134,10 @@ class InvokeCapability:
             or invocation.input_schema_version != version
         ):
             raise UnsupportedCapability
+        if self._quota is not None:
+            retry_after = self._quota.consume(account, capability_id)
+            if retry_after is not None:
+                raise QuotaExceeded(retry_after)
         output = self._gateway.invoke(capability_id, invocation, idempotency_key)
         if output.output_schema_version != version:
             raise CapabilityUnavailable

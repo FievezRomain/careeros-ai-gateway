@@ -17,6 +17,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from starlette.middleware.base import RequestResponseEndpoint
 
 from careeros_ai_gateway.adapters.openai import OpenAIResponsesGateway, ResponsesClient
+from careeros_ai_gateway.adapters.policy import FallbackGateway, FixedWindowQuota
 from careeros_ai_gateway.application.capability import (
     AccountContext,
     CapabilityGateway,
@@ -28,6 +29,7 @@ from careeros_ai_gateway.application.capability import (
     PermissionDenied,
     ProviderOutput,
     ProviderResponseInvalid,
+    QuotaExceeded,
     UnsupportedCapability,
 )
 
@@ -43,11 +45,18 @@ class Settings(BaseSettings):
     oidc_audience: str = Field(min_length=1)
     openai_api_key: SecretStr | None = None
     openai_model: str | None = Field(default=None, min_length=1)
+    openai_fallback_model: str | None = Field(default=None, min_length=1)
+    ai_timeout_seconds: float = Field(default=20, gt=0, le=120)
+    ai_quota_per_minute: int = Field(default=60, ge=1, le=10_000)
 
     @model_validator(mode="after")
     def validate_provider_configuration(self) -> Settings:
         if (self.openai_api_key is None) != (self.openai_model is None):
             raise ValueError("OPENAI_API_KEY and OPENAI_MODEL must be configured together")
+        if self.openai_fallback_model is not None and self.openai_model is None:
+            raise ValueError("OPENAI_FALLBACK_MODEL requires OPENAI_MODEL")
+        if self.openai_fallback_model == self.openai_model and self.openai_model is not None:
+            raise ValueError("OPENAI_FALLBACK_MODEL must differ from OPENAI_MODEL")
         return self
 
 
@@ -98,22 +107,39 @@ def create_app(
     configured = settings or Settings()
     provider: CapabilityGateway
     if gateway is not None:
-        provider = gateway
+        provider = FallbackGateway((gateway,))
     elif configured.openai_api_key is not None and configured.openai_model is not None:
-        client = OpenAI(api_key=configured.openai_api_key.get_secret_value(), max_retries=0)
-        provider = OpenAIResponsesGateway(
-            cast(ResponsesClient, client.responses), configured.openai_model
+        client = OpenAI(
+            api_key=configured.openai_api_key.get_secret_value(),
+            max_retries=0,
+            timeout=configured.ai_timeout_seconds,
         )
+        responses = cast(ResponsesClient, client.responses)
+        routes: list[CapabilityGateway] = [
+            OpenAIResponsesGateway(
+                responses, configured.openai_model, configured.ai_timeout_seconds
+            )
+        ]
+        if configured.openai_fallback_model is not None:
+            routes.append(
+                OpenAIResponsesGateway(
+                    responses,
+                    configured.openai_fallback_model,
+                    configured.ai_timeout_seconds,
+                )
+            )
+        provider = FallbackGateway(routes)
     else:
         provider = UnavailableGateway()
     verifier = token_verifier or RejectingTokenVerifier()
-    invoke = InvokeCapability(provider, _VERSIONS)
+    invoke = InvokeCapability(provider, _VERSIONS, FixedWindowQuota(configured.ai_quota_per_minute))
     oidc = OpenIdConnect(
         openIdConnectUrl=f"{str(configured.oidc_issuer).rstrip('/')}/.well-known/openid-configuration",
         auto_error=False,
     )
     logger = logging.getLogger("careeros.ai_gateway.http")
     logger.setLevel(configured.log_level.upper())
+    logging.getLogger("careeros.ai_gateway.provider").setLevel(configured.log_level.upper())
     app = FastAPI(title="CareerOS AI Gateway", version="1.0.0")
 
     @app.middleware("http")
@@ -166,12 +192,14 @@ def create_app(
             code=code,
             correlation_id=request.state.correlation_id,
         )
-        headers = {"WWW-Authenticate": "Bearer"} if status == 401 else None
+        headers = dict(error.headers or {}) if isinstance(error, HTTPException) else {}
+        if status == 401:
+            headers.setdefault("WWW-Authenticate", "Bearer")
         return JSONResponse(
             model.model_dump(by_alias=True),
             status_code=status,
             media_type="application/problem+json",
-            headers=headers,
+            headers=headers or None,
         )
 
     @app.get("/health/live", response_model=Health, tags=["operations"])
@@ -189,6 +217,7 @@ def create_app(
         "/v1/capabilities/{capability_id}/invocations",
         response_model=CapabilityResult,
         response_model_by_alias=True,
+        responses={429: {"model": Problem, "description": "Invocation quota exhausted."}},
         tags=["capabilities"],
     )
     def invoke_capability(
@@ -212,6 +241,12 @@ def create_app(
         except ProviderResponseInvalid:
             raise _error(
                 502, "PROVIDER_RESPONSE_INVALID", "Provider output failed validation."
+            ) from None
+        except QuotaExceeded as error:
+            raise HTTPException(
+                429,
+                {"code": "QUOTA_EXCEEDED", "detail": "Invocation quota is exhausted."},
+                headers={"Retry-After": str(error.retry_after_seconds)},
             ) from None
         except CapabilityUnavailable:
             raise _error(503, "CAPABILITY_UNAVAILABLE", "No provider route is available.") from None
