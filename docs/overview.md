@@ -67,6 +67,17 @@ stable derived idempotency keys. This stateless service does not claim durable r
 
 ## Contract rules
 
+`discover-job-links` version `1.0` accepts up to five normalized values each for
+`targetRoles`, `locations` and `contractTypes`, plus `remotePolicy`. The model
+uses structured output and exact signature terms to compose up to three distinct
+queries. `TAVILY_API_KEY` enables raw search. Requests use basic search with up to
+five hits per query and generated answers disabled. The gateway validates result
+URLs and metadata, deduplicates equivalent links and caches each successful query
+for five minutes in memory. `searchRequests` reports logical queries, including
+cache hits. Model token usage and query counts support cost attribution. Quotas and
+logging follow V1-022, and retrieval expires after at most five seconds of HTTP
+inactivity per query. Retry a failed discovery through the scheduled discovery command.
+
 - APIs and events are versioned.
 - Consumers must be idempotent where retries are possible.
 - Correlation identifiers are propagated without logging sensitive payloads.
@@ -82,7 +93,7 @@ Persist the minimum data required, record provenance, define retention, redact l
 
 The service is stateless in V1-020. Request and response bodies, bearer tokens,
 tenant identifiers and account identifiers are excluded from logs. Startup
-configuration is validated through Pydantic settings; OIDC issuer and audience
-are required and provider secrets remain outside the repository. Token
-verification is an injected boundary adapter; the safe default rejects every
-token until the deployment supplies its configured verifier.
+configuration is validated through Pydantic settings. `OIDC_JWKS_URL` enables
+signature verification against the configured issuer and audience. The default
+denies bearer tokens until a JWKS URL or a deployment verifier is configured.
+Provider secrets remain outside the repository.
